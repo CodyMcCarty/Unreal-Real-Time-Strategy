@@ -5,8 +5,11 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "KismetTraceUtils.h"
+#include "SandCoreLogToolsBPLibrary.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Net/UnrealNetwork.h"
+
+DEFINE_LOG_CATEGORY(LogGame);
 
 namespace
 {
@@ -88,23 +91,18 @@ AStratPlayerCameraPawn::AStratPlayerCameraPawn()
 	SpringArmComp->CameraRotationLagSpeed = CameraRotationLagSpeed;
 	SpringArmComp->bEnableCameraLag = false;
 	SpringArmComp->bEnableCameraRotationLag = false;
-	SpringArmComp->TargetArmLength = TargetArmLength;
+	SpringArmComp->TargetArmLength = ZoomArmLength;
 	SpringArmComp->SetRelativeRotation(FRotator(-45.f, 0.f, 0.f));
 
-	const float ArmLengthNormal = GetZoomAlpha(TargetArmLength, MinZoom, MaxZoom);
-	MoveSpeed = FMath::Lerp(MinMoveSpeed, MaxMoveSpeed, ArmLengthNormal);
+	const float ArmLengthNormal = GetZoomAlpha(ZoomArmLength, MinZoom, MaxZoom);
+	MoveSpeedCalculated = FMath::Lerp(MinMoveSpeed, MaxMoveSpeed, ArmLengthNormal);
 }
 
 void AStratPlayerCameraPawn::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
-	DOREPLIFETIME_CONDITION(AStratPlayerCameraPawn, SimpleReplicatedMovement, COND_SkipOwner);
-}
-
-void AStratPlayerCameraPawn::PostInitializeComponents()
-{
-	Super::PostInitializeComponents();
+	DOREPLIFETIME_CONDITION(AStratPlayerCameraPawn, SimpleRepMovement, COND_SkipOwner);
 }
 
 void AStratPlayerCameraPawn::SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent)
@@ -135,9 +133,9 @@ void AStratPlayerCameraPawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	SimpleReplicatedMovement.Location = GetActorLocation();
-	SimpleReplicatedMovement.Yaw = GetActorRotation().Yaw;
-	
+	SimpleRepMovement.Location = GetActorLocation();
+	SimpleRepMovement.Yaw = GetActorRotation().Yaw;
+
 	if (Controller)
 	{
 		const FRotator ControlRot = GetControlRotation();
@@ -155,7 +153,7 @@ void AStratPlayerCameraPawn::NotifyControllerChanged()
 
 		SetInputMode_RTSStyle(Cast<APlayerController>(Controller));
 	}
-	
+
 	Super::NotifyControllerChanged(); //~Super calls BP handler, and PreviousController = Controller;
 }
 
@@ -166,8 +164,6 @@ void AStratPlayerCameraPawn::OnRep_Controller()
 	GetWorldTimerManager().SetTimer(SendSimpleRepMovement_TimerHandle, this, &ThisClass::TimerLoop_SendSimpleRepMovement, 1 / SendTransform_TimerFreq, true);
 }
 
-UE_DISABLE_OPTIMIZATION
-
 void AStratPlayerCameraPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -176,15 +172,15 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 	{
 		//~ Movement
 		const FVector InputVector = ConsumeMovementInputVector();
-		const FVector Velocity = InputVector * MoveSpeed * DeltaTime;
-		SimpleReplicatedMovement.Location += Velocity;
+		const FVector Velocity = InputVector * MoveSpeedCalculated * DeltaTime;
+		SimpleRepMovement.Location += Velocity;
 
 		//~ Zoom
-		SpringArmComp->TargetArmLength = FMath::FInterpTo(SpringArmComp->TargetArmLength, TargetArmLength, DeltaTime, CameraZoomLagSpeed);
+		SpringArmComp->TargetArmLength = FMath::FInterpTo(SpringArmComp->TargetArmLength, ZoomArmLength, DeltaTime, CameraZoomLagSpeed);
 
-		//~ Rotation
+		//~ Rotation (Pitch controls the SpringArmComp. Yaw controls the Actor.)
 		const FRotator ControlRot = ClampPitch(GetControlRotation().GetNormalized());
-		SimpleReplicatedMovement.Yaw = ControlRot.Yaw;
+		SimpleRepMovement.Yaw = ControlRot.Yaw;
 		Controller->SetControlRotation(ControlRot.GetDenormalized());
 
 		const FRotator CurrentRot(SpringArmComp->GetRelativeRotation().Pitch, GetActorRotation().Yaw, 0.f);
@@ -199,12 +195,13 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 	}
 	else
 	{
-		const FRotator ProxyRot(0.f, SimpleReplicatedMovement.Yaw, 0.f);
+		const FRotator ProxyRot(0.f, SimpleRepMovement.Yaw, 0.f);
 		SetActorRotation(ProxyRot);
 	}
 
-	FVector ActorLocation = GetActorLocation();
-	FVector TargetLocation = FMath::VInterpTo(ActorLocation, SimpleReplicatedMovement.Location, DeltaTime, CameraLagSpeed);
+	//~ Apply Movement
+	const FVector ActorLocation = GetActorLocation();
+	const FVector TargetLocation = FMath::VInterpTo(ActorLocation, SimpleRepMovement.Location, DeltaTime, CameraLagSpeed);
 	SetActorLocation(TargetLocation);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -212,22 +209,13 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 	{
 		if (const UWorld* World = GetWorld())
 		{
-			DrawDebugSphere(World, ActorLocation, 5.f, 8, FColor::Green);
-			DrawDebugSphere(World, SimpleReplicatedMovement.Location, 5.f, 8, FColor::Yellow);
-
-			const FVector ToOrigin = ActorLocation - SimpleReplicatedMovement.Location;
-			DrawDebugDirectionalArrow(World, SimpleReplicatedMovement.Location, SimpleReplicatedMovement.Location + ToOrigin * 0.5f, 7.5f, FColor::Green);
-			DrawDebugDirectionalArrow(World, SimpleReplicatedMovement.Location + ToOrigin * 0.5f, ActorLocation, 7.5f, FColor::Green);
-
-			DrawDebugCone(World, ActorLocation, GetControlRotation().Vector(), 125.f, 0.7f, 0.f, 8, FColor::Yellow);
-			DrawDebugCone(World, ActorLocation, GetActorForwardVector(), 175.f, 0.7f, 0.f, 8, FColor::Orange);
-			DrawDebugCone(World, ActorLocation, SpringArmComp->GetForwardVector(), 225.f, 0.7f, 0.f, 8, FColor::Red);
+			DrawDebugSphere(World, SimpleRepMovement.Location, 5.f, 8, FColor::Green);
+			DrawDebugDirectionalArrow(World, ActorLocation, SimpleRepMovement.Location, 7.5f, FColor::Green);
+			DrawDebugCone(World, ActorLocation, GetActorForwardVector(), 175.f, 0.7f, 0.f, 8, FColor::Yellow);
 		}
 	}
 #endif
 }
-
-UE_ENABLE_OPTIMIZATION
 
 void AStratPlayerCameraPawn::TimerLoop_TraceForCameraHeight()
 {
@@ -236,8 +224,8 @@ void AStratPlayerCameraPawn::TimerLoop_TraceForCameraHeight()
 
 	TArray<FHitResult> HitResults;
 	const FVector Dist(0.f, 0.f, 10'000.f);
-	const FVector Start = SimpleReplicatedMovement.Location + Dist;
-	const FVector End = SimpleReplicatedMovement.Location - Dist;
+	const FVector Start = SimpleRepMovement.Location + Dist;
+	const FVector End = SimpleRepMovement.Location - Dist;
 	constexpr float Radius = 50.f;
 	FCollisionQueryParams QueryParams = FCollisionQueryParams::DefaultQueryParam;
 	QueryParams.AddIgnoredActor(this);
@@ -252,18 +240,18 @@ void AStratPlayerCameraPawn::TimerLoop_TraceForCameraHeight()
 #endif
 
 	//~ a blocking hit (if found) will be the last element of the array. the results are [0] is top floor [last] is terrain.
-	//~ todo: have floor system. I could have terrain block, and floors overlap.
+	//~ todo: have floor system with terrain block, and floors overlap.
 	if (!HitResults.IsEmpty())
 	{
 		const float GroundZ = HitResults[0].Location.Z;
-		SimpleReplicatedMovement.Location.Z = GroundZ;
+		SimpleRepMovement.Location.Z = GroundZ;
 	}
 }
 
 void AStratPlayerCameraPawn::TimerLoop_SendSimpleRepMovement()
 {
-	SimpleReplicatedMovement.ServerFrame++;
-	Server_SetSimpleReplicatedMovementState(SimpleReplicatedMovement);
+	SimpleRepMovement.ServerFrame++;
+	Server_SetSimpleRepMovementState(SimpleRepMovement);
 }
 
 void AStratPlayerCameraPawn::Move(const FInputActionInstance& InputActionInstance)
@@ -278,11 +266,11 @@ void AStratPlayerCameraPawn::Zoom(const FInputActionInstance& InputActionInstanc
 	const float ZoomValue = InputActionInstance.GetValue().Get<float>();
 	const float ZoomDelta = FMath::Max(SpringArmComp->TargetArmLength / UE_GOLDEN_RATIO, 50.f);
 
-	TargetArmLength += ZoomDelta * ZoomValue;
-	TargetArmLength = FMath::Clamp(TargetArmLength, MinZoom, MaxZoom);
+	ZoomArmLength += ZoomDelta * ZoomValue;
+	ZoomArmLength = FMath::Clamp(ZoomArmLength, MinZoom, MaxZoom);
 
-	const float ArmLengthNormal = GetZoomAlpha(TargetArmLength, MinZoom, MaxZoom);
-	MoveSpeed = FMath::Lerp(MinMoveSpeed, MaxMoveSpeed, ArmLengthNormal);
+	const float ArmLengthNormal = GetZoomAlpha(ZoomArmLength, MinZoom, MaxZoom);
+	MoveSpeedCalculated = FMath::Lerp(MinMoveSpeed, MaxMoveSpeed, ArmLengthNormal);
 }
 
 void AStratPlayerCameraPawn::RotateStarted(const FInputActionInstance& InputActionInstance)
@@ -321,20 +309,24 @@ void AStratPlayerCameraPawn::EnableRotateEnded(const FInputActionInstance& Input
 	SetMousePos(PC, MousePosSnapshot);
 }
 
-void AStratPlayerCameraPawn::OnRep_SimpleReplicatedMovement(const FSimpleRepMovement& OldSimpleRepMovement)
+void AStratPlayerCameraPawn::OnRep_SimpleRepMovement(const FSimpleRepMovement& OldSimpleRepMovement)
 {
 	check(!IsLocallyControlled());
-	if (OldSimpleRepMovement.ServerFrame > SimpleReplicatedMovement.ServerFrame)
+	if (OldSimpleRepMovement.ServerFrame > SimpleRepMovement.ServerFrame)
 	{
-		SimpleReplicatedMovement = OldSimpleRepMovement;
+		SimpleRepMovement = OldSimpleRepMovement;
+		INFO_CLOG(bDrawDebugMarkers, LogGame, Log, TEXT("Rejected out of date OnRep_RepMovement."))
 	}
 }
 
-// todo: can\should I pass a ref?
-void AStratPlayerCameraPawn::Server_SetSimpleReplicatedMovementState_Implementation(const FSimpleRepMovement NewSimpleRepMovement)
+void AStratPlayerCameraPawn::Server_SetSimpleRepMovementState_Implementation(const FSimpleRepMovement NewSimpleRepMovement)
 {
-	if (NewSimpleRepMovement.ServerFrame > SimpleReplicatedMovement.ServerFrame)
+	if (NewSimpleRepMovement.ServerFrame > SimpleRepMovement.ServerFrame)
 	{
-		SimpleReplicatedMovement = NewSimpleRepMovement;
+		SimpleRepMovement = NewSimpleRepMovement;
+	}
+	else
+	{
+		INFO_CLOG(bDrawDebugMarkers, LogGame, Log, TEXT("Rejected out of date SetNew_RepMovement."))
 	}
 }
