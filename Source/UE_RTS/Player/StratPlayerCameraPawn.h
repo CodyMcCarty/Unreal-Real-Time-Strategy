@@ -7,6 +7,7 @@
 #include "ModularPawn.h"
 #include "StratPlayerCameraPawn.generated.h"
 
+class UCameraComponent;
 class USpringArmComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -105,6 +106,7 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite) // todo: does this a uprop()?
 	TObjectPtr<USpringArmComponent> SpringArmComp;
+	
 	FTimerHandle SendSimpleRepMovement_TimerHandle;
 	FTimerHandle TraceForCameraHeight_TimerHandle;
 	FIntPoint MousePosSnapshot;

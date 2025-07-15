@@ -6,6 +6,7 @@
 #include "EnhancedInputSubsystems.h"
 #include "KismetTraceUtils.h"
 #include "SandCoreLogToolsBPLibrary.h"
+#include "Camera/CameraComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Net/UnrealNetwork.h"
@@ -197,7 +198,7 @@ FRotator AStratPlayerCameraPawn::FindCamLookAtRot(const FHitResult& InDesiredCam
 void AStratPlayerCameraPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-
+	
 	if (IsLocallyControlled())
 	{
 		//~ Movement ~
@@ -214,48 +215,63 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 
 		//~ Rotation ~ (Pitch controls the SpringArmComp. Yaw controls the Actor.)
 		{
-			FHitResult DesiredCamHit;
-			if (IsCamClippingGround(DesiredCamHit))
-			{
-				const FVector CurrLoc = GetActorLocation();
-				const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
-				const float NewHeight = DesiredCamHit.Location.Z - (CamLoc.Z - CurrLoc.Z);
-				SetActorLocation(FVector(CurrLoc.X, CurrLoc.Y, NewHeight));
-			}
-
-			const FRotator ControlRot = Controller->GetControlRotation().GetNormalized();
-			SimpleRepMovement.Yaw = ControlRot.Yaw;
-			DrawDebugCone(GetWorld(), GetActorLocation(), GetControlRotation().Vector(), 175.f, 0.7f, 0.f, 8, FColor::Yellow);
-
 			const FRotator SpringArmRot = SpringArmComp->GetRelativeRotation();
-			const FRotator CurrentRot(SpringArmRot.Pitch, GetActorRotation().Yaw, 0.f);
+			const FRotator ActorRot = GetActorRotation();
+			const FRotator CurrentRot(SpringArmRot.Pitch, ActorRot.Yaw, 0.f);
+			const FRotator ControlRot = Controller->GetControlRotation().GetNormalized();
 			const FRotator TargetRot(FMath::QInterpTo(FQuat(CurrentRot), FQuat(ControlRot), DeltaTime, CameraRotationLagSpeed));
 
 			SetActorRotation(FRotator(0.f, TargetRot.Yaw, 0.f));
 			SpringArmComp->SetRelativeRotation(FRotator(TargetRot.Pitch, 0.f, 0.f));
+			SimpleRepMovement.Yaw = ControlRot.Yaw;
 		}
 
-		if (GetLocalRole() == ROLE_AutonomousProxy)
+		float GroundClippingHeight{0.f};
+		FHitResult DesiredCamHit;
+		if (IsCamClippingGround(DesiredCamHit))
 		{
+			const FVector CurrLoc = GetActorLocation();
+			const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
+			// const float NewHeight = DesiredCamHit.Location.Z - (CamLoc.Z - CurrLoc.Z);
+			// SetActorLocation(FVector(CurrLoc.X, CurrLoc.Y, NewHeight));
+			GroundClippingHeight = DesiredCamHit.Location.Z - CamLoc.Z;
+		}
+
+		//~ Apply Movement ~
+		FVector ActorLoc = GetActorLocation();
+		ActorLoc.Z += GroundClippingHeight;
+		FVector TargetLoc = SimpleRepMovement.Location;
+		FVector NewLoc = FMath::VInterpTo(ActorLoc, TargetLoc, DeltaTime, CameraLagSpeed);
+		SetActorLocation(NewLoc);
+
+		if (GetLocalRole() == ROLE_Authority)
+		{
+
+		}
+		else if (GetLocalRole() == ROLE_AutonomousProxy)
+		{
+			
 		}
 	}
 	else
 	{
+		//~ Apply Movement ~
+		const FVector ActorLocation = GetActorLocation();
+		const FVector NewLocation = FMath::VInterpTo(ActorLocation, SimpleRepMovement.Location, DeltaTime, CameraLagSpeed);
+		SetActorLocation(NewLocation);
+		
 		const FRotator ProxyRot(0.f, SimpleRepMovement.Yaw, 0.f);
 		SetActorRotation(ProxyRot);
 	}
 
 	// todo: FMath::ComputeSlideVector
-	//~ Apply Movement ~
-	const FVector ActorLocation = GetActorLocation();
-	const FVector TargetLocation = FMath::VInterpTo(ActorLocation, SimpleRepMovement.Location, DeltaTime, CameraLagSpeed);
-	SetActorLocation(TargetLocation);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	if (bDrawDebugMarkers)
 	{
 		if (const UWorld* World = GetWorld())
 		{
+			FVector ActorLocation = GetActorLocation();
 			DrawDebugSphere(World, SimpleRepMovement.Location, 5.f, 8, FColor::Green);
 			DrawDebugDirectionalArrow(World, ActorLocation, SimpleRepMovement.Location, 7.5f, FColor::Green);
 			DrawDebugCone(World, ActorLocation, GetActorForwardVector(), 175.f, 0.7f, 0.f, 8, FColor::Yellow);
