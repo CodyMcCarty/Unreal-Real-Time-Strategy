@@ -7,6 +7,7 @@
 #include "KismetTraceUtils.h"
 #include "SandCoreLogToolsBPLibrary.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY(LogGame);
@@ -31,7 +32,7 @@ namespace
 	FRotator ClampPitch(const FRotator& Rot)
 	{
 		FRotator Result = Rot;
-		Result.Pitch = FMath::Clamp(Result.Pitch, -85.f, 10.f);
+		Result.Pitch = FMath::Clamp(Result.Pitch, -85.f, 20.f); // <- normalized. UnNormal Rot would be 
 		return Result;
 	}
 
@@ -164,30 +165,75 @@ void AStratPlayerCameraPawn::OnRep_Controller()
 	GetWorldTimerManager().SetTimer(SendSimpleRepMovement_TimerHandle, this, &ThisClass::TimerLoop_SendSimpleRepMovement, 1 / SendTransform_TimerFreq, true);
 }
 
+UE_DISABLE_OPTIMIZATION
+
+bool AStratPlayerCameraPawn::IsCamClippingGround(FHitResult& OutHit) const
+{
+	const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
+	const bool bHit = GetWorld()->SweepSingleByChannel
+	(
+		OutHit,
+		CamLoc + FVector(0.f, 0.f, 1000.f),
+		CamLoc - FVector(0.f, 0.f, 1000.f),
+		FQuat::Identity, TerrainHeightTraceChannel,
+		FCollisionShape::MakeSphere(100.f),
+		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn), false, this)
+	);
+
+	return bHit && OutHit.Location.Z > CamLoc.Z;
+}
+
+FRotator AStratPlayerCameraPawn::FindCamLookAtRot(const FHitResult& InDesiredCamHit) const
+{
+	FRotator ResultRot = Controller->GetControlRotation().GetNormalized();
+	const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
+	const FVector SafeCamLoc(CamLoc.X, CamLoc.Y, InDesiredCamHit.Location.Z);
+	const FRotator LookAtRot = FRotationMatrix::MakeFromX(GetActorLocation() - SafeCamLoc).Rotator();
+	ResultRot.Pitch = LookAtRot.Pitch;
+
+	return ResultRot;
+}
+
 void AStratPlayerCameraPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
 	if (IsLocallyControlled())
 	{
-		//~ Movement
-		const FVector InputVector = ConsumeMovementInputVector();
-		const FVector Velocity = InputVector * MoveSpeedCalculated * DeltaTime;
-		SimpleRepMovement.Location += Velocity;
+		//~ Movement ~
+		{
+			const FVector InputVector = ConsumeMovementInputVector();
+			const FVector Velocity = InputVector * MoveSpeedCalculated * DeltaTime;
+			SimpleRepMovement.Location += Velocity;
+		}
 
-		//~ Zoom
-		SpringArmComp->TargetArmLength = FMath::FInterpTo(SpringArmComp->TargetArmLength, ZoomArmLength, DeltaTime, CameraZoomLagSpeed);
+		//~ Zoom ~
+		{
+			SpringArmComp->TargetArmLength = FMath::FInterpTo(SpringArmComp->TargetArmLength, ZoomArmLength, DeltaTime, CameraZoomLagSpeed);
+		}
 
-		//~ Rotation (Pitch controls the SpringArmComp. Yaw controls the Actor.)
-		const FRotator ControlRot = ClampPitch(GetControlRotation().GetNormalized());
-		SimpleRepMovement.Yaw = ControlRot.Yaw;
-		Controller->SetControlRotation(ControlRot.GetDenormalized());
+		//~ Rotation ~ (Pitch controls the SpringArmComp. Yaw controls the Actor.)
+		{
+			FHitResult DesiredCamHit;
+			if (IsCamClippingGround(DesiredCamHit))
+			{
+				const FVector CurrLoc = GetActorLocation();
+				const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
+				const float NewHeight = DesiredCamHit.Location.Z - (CamLoc.Z - CurrLoc.Z);
+				SetActorLocation(FVector(CurrLoc.X, CurrLoc.Y, NewHeight));
+			}
 
-		const FRotator CurrentRot(SpringArmComp->GetRelativeRotation().Pitch, GetActorRotation().Yaw, 0.f);
-		const FRotator TargetRot(FMath::QInterpTo(FQuat(CurrentRot), FQuat(ControlRot), DeltaTime, CameraRotationLagSpeed));
+			const FRotator ControlRot = Controller->GetControlRotation().GetNormalized();
+			SimpleRepMovement.Yaw = ControlRot.Yaw;
+			DrawDebugCone(GetWorld(), GetActorLocation(), GetControlRotation().Vector(), 175.f, 0.7f, 0.f, 8, FColor::Yellow);
 
-		SpringArmComp->SetRelativeRotation(FRotator(TargetRot.Pitch, 0.f, 0.f));
-		SetActorRotation(FRotator(0.f, TargetRot.Yaw, 0.f));;
+			const FRotator SpringArmRot = SpringArmComp->GetRelativeRotation();
+			const FRotator CurrentRot(SpringArmRot.Pitch, GetActorRotation().Yaw, 0.f);
+			const FRotator TargetRot(FMath::QInterpTo(FQuat(CurrentRot), FQuat(ControlRot), DeltaTime, CameraRotationLagSpeed));
+
+			SetActorRotation(FRotator(0.f, TargetRot.Yaw, 0.f));
+			SpringArmComp->SetRelativeRotation(FRotator(TargetRot.Pitch, 0.f, 0.f));
+		}
 
 		if (GetLocalRole() == ROLE_AutonomousProxy)
 		{
@@ -199,7 +245,8 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 		SetActorRotation(ProxyRot);
 	}
 
-	//~ Apply Movement
+	// todo: FMath::ComputeSlideVector
+	//~ Apply Movement ~
 	const FVector ActorLocation = GetActorLocation();
 	const FVector TargetLocation = FMath::VInterpTo(ActorLocation, SimpleRepMovement.Location, DeltaTime, CameraLagSpeed);
 	SetActorLocation(TargetLocation);
@@ -217,6 +264,8 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 #endif
 }
 
+UE_ENABLE_OPTIMIZATION
+
 void AStratPlayerCameraPawn::TimerLoop_TraceForCameraHeight()
 {
 	const UWorld* World = GetWorld();
@@ -226,11 +275,19 @@ void AStratPlayerCameraPawn::TimerLoop_TraceForCameraHeight()
 	const FVector Dist(0.f, 0.f, 10'000.f);
 	const FVector Start = SimpleRepMovement.Location + Dist;
 	const FVector End = SimpleRepMovement.Location - Dist;
-	constexpr float Radius = 50.f;
-	FCollisionQueryParams QueryParams = FCollisionQueryParams::DefaultQueryParam;
+	constexpr float Radius = 75.f;
+	FCollisionQueryParams QueryParams = FCollisionQueryParams::DefaultQueryParam; // 
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.bTraceComplex = false;
-	const bool bHit = World->SweepMultiByChannel(HitResults, Start, End, FQuat::Identity, TerrainHeightTraceChannel, FCollisionShape::MakeSphere(Radius), QueryParams);
+	const bool bHit = World->SweepMultiByChannel
+	(HitResults,
+		Start,
+		End,
+		FQuat::Identity,
+		TerrainHeightTraceChannel,
+		FCollisionShape::MakeSphere(Radius),
+		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn), false, this)
+	);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	if (bDrawDebugMarkers)
@@ -289,6 +346,9 @@ void AStratPlayerCameraPawn::Rotate(const FInputActionInstance& InputActionInsta
 	const FVector2D RotateValue = InputActionInstance.GetValue().Get<FVector2D>();
 	AddControllerYawInput(RotateValue.X);
 	AddControllerPitchInput(RotateValue.Y);
+
+	const FRotator ControlRot = ClampPitch(Controller->GetControlRotation().GetNormalized());
+	Controller->SetControlRotation(ControlRot.GetDenormalized());
 }
 
 void AStratPlayerCameraPawn::EnableRotateStarted(const FInputActionInstance& InputActionInstance)

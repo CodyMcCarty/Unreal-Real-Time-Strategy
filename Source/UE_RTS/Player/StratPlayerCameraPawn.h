@@ -11,6 +11,34 @@ class USpringArmComponent;
 class UInputAction;
 class UInputMappingContext;
 
+/* Notes on blocking: Does the spring arm have any collision? Does the camera? Does the ActorRoot
+ * __Kenshi__
+ * Person and Cam can only go so far. Cam can look (spring arm) past end. No clipping in terrain, but in buildings and most anything else.
+ * Actor=(WorldEnd). SpringArm=(None). Cam=(terrain)
+ * __Tropico__
+ * Can not look up clamped at -15. cam not clip through terrain, but buildigns. actor stoped at world end but can look past
+ * Actor=(WorldEnd). SpringArm=(none). Cam=(terrain)
+ * __UE Setup for collision__
+ * Channel | Ignore | Overlap | Block
+ * Visibility: Ignore=(Pawn)
+ * Camera
+ *
+ * 3rdPrsFloor(Default)	Visibility=?		| Camera=?
+ * Land(BlockAll)		Visibility=Block	| Camera=Block	[b]
+ * NewFloor(BlkAlDy)	Visibility=Block	| Camera=Block	[b]
+ * PhysicsActor			Visibility=Block	| Camera=Block	[b]
+ * Projectile			Visibility=Block	| Camera=Block	[b]
+ * Vehicle				Visibility=Block	| Camera=Block	[i]
+ * Roof(Custom)			Visibility=Ignore	| Camera=Ignore	[i]
+ * Pawn:				Visibility=Ignore	| Camera=Block	[D]
+ * CharacterMesh:		Visibility=Ignore	| Camera=Block	[D]
+ * OverlapOnlyPawn		Visibility=Block	| Camera=Ignore	[D]
+ * InvisibleWall		Visibility=Ignore	| Camera=Block	[D]
+ * Trigger				Visibility=Ignore	| Camera=Ovrlap	[D]
+ * Ragdoll				Visibility=Ignore	| Camera=Block	[D]
+ * UI					Visibility=Block	| Camera=Ovrlap	[D]
+ */
+
 DECLARE_LOG_CATEGORY_EXTERN(LogGame, Log, All);
 
 /** Replicated movement data. Simplified version of FRepMovement more suited to an RTS camera.  */
@@ -30,7 +58,7 @@ struct FSimpleRepMovement
 	uint32 ServerFrame{0};
 };
 
-/** Responsible for moving the player around the map. */
+/** Responsible for moving the player around the map. Feels more like a Tycoon game than an RTS. Smooth movement even in bad network emulation. */
 UCLASS()
 class UE_RTS_API AStratPlayerCameraPawn : public AModularPawn
 {
@@ -75,7 +103,7 @@ protected:
 	UFUNCTION(Server, Unreliable)
 	void Server_SetSimpleRepMovementState(const FSimpleRepMovement NewSimpleRepMovement);
 
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, BlueprintReadWrite) // todo: does this a uprop()?
 	TObjectPtr<USpringArmComponent> SpringArmComp;
 	FTimerHandle SendSimpleRepMovement_TimerHandle;
 	FTimerHandle TraceForCameraHeight_TimerHandle;
@@ -93,6 +121,7 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="User|Info", meta=(Units="cm"))
 	float ZoomArmLength{800.f};
 
+	// todo: consider having a BPConfig data asset.
 #pragma region BPConfig
 
 protected:
@@ -156,4 +185,8 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="User|Options")
 	TEnumAsByte<ECollisionChannel> TerrainHeightTraceChannel{ECC_Visibility};
 #pragma endregion
+
+protected:
+	bool IsCamClippingGround(FHitResult& OutHit) const;
+	FRotator FindCamLookAtRot(const FHitResult& InDesiredCamHit) const;
 };

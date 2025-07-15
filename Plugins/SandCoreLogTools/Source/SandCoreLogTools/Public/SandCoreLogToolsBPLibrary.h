@@ -146,6 +146,6 @@ public:
 	 * @param Verbosity The severity level (Log, Warning, Error, etc.)
 	 * @param Message The message text to display/log
 	 */
-	UFUNCTION(BlueprintCallable, meta=(WorldContext="WorldContextObject", CallableWithoutWorldContext, Keywords = "log print", DevelopmentOnly, DisplayName="LogGame"), Category="Development")
+	UFUNCTION(BlueprintCallable, meta=(WorldContext="WorldContextObject", CallableWithoutWorldContext, Keywords = "log print", DevelopmentOnly, DisplayName="LogGame"), Category="LogTools")
 	static void SandCoreLogGame(const UObject* WorldContextObject, ESandCoreLogVerbosity Verbosity = ESandCoreLogVerbosity::Log, const FText Message = INVTEXT("Hello"));
 };
