@@ -98,6 +98,7 @@ AStratPlayerCameraPawn::AStratPlayerCameraPawn()
 
 	const float ArmLengthNormal = GetZoomAlpha(ZoomArmLength, MinZoom, MaxZoom);
 	MoveSpeedCalculated = FMath::Lerp(MinMoveSpeed, MaxMoveSpeed, ArmLengthNormal);
+	MapBounds.bIsValid = true;
 }
 
 void AStratPlayerCameraPawn::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const
@@ -135,8 +136,12 @@ void AStratPlayerCameraPawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	SimpleRepMovement.Location = GetActorLocation();
-	SimpleRepMovement.Yaw = GetActorRotation().Yaw;
+	{
+		const FVector ActorLocation = GetActorLocation();
+		TargetLoc = ActorLocation;
+		SimpleRepMovement.Location = ActorLocation;
+		SimpleRepMovement.Yaw = GetActorRotation().Yaw;
+	}
 
 	if (Controller)
 	{
@@ -151,7 +156,7 @@ void AStratPlayerCameraPawn::NotifyControllerChanged()
 {
 	if (IsLocallyControlled())
 	{
-		GetWorldTimerManager().SetTimer(TraceForCameraHeight_TimerHandle, this, &ThisClass::TimerLoop_TraceForCameraHeight, 1 / TraceForCameraHeight_TimerFreq, true);
+		GetWorldTimerManager().SetTimer(TraceForCameraHeight_TimerHandle, this, &ThisClass::TimerLoop_TraceForPawnHeight, 1 / TraceForCameraHeight_TimerFreq, true);
 
 		SetInputMode_RTSStyle(Cast<APlayerController>(Controller));
 	}
@@ -168,14 +173,14 @@ void AStratPlayerCameraPawn::OnRep_Controller()
 
 UE_DISABLE_OPTIMIZATION
 
-bool AStratPlayerCameraPawn::IsCamClippingGround(FHitResult& OutHit) const
+bool AStratPlayerCameraPawn::IsCamClippingGround(FHitResult& OutHit, FVector CamLoc) const
 {
-	const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
+	// const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
 	const bool bHit = GetWorld()->SweepSingleByChannel
 	(
 		OutHit,
-		CamLoc + FVector(0.f, 0.f, 1000.f),
-		CamLoc - FVector(0.f, 0.f, 1000.f),
+		CamLoc + FVector(0.f, 0.f, 10000.f),
+		CamLoc - FVector(0.f, 0.f, 500.f),
 		FQuat::Identity, TerrainHeightTraceChannel,
 		FCollisionShape::MakeSphere(100.f),
 		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn), false, this)
@@ -198,14 +203,36 @@ FRotator AStratPlayerCameraPawn::FindCamLookAtRot(const FHitResult& InDesiredCam
 void AStratPlayerCameraPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	
+
 	if (IsLocallyControlled())
 	{
+		// float HeightFromCamToNoClip{0.f};
+		// const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
+		// FHitResult DesiredCamHit;
+		// bool bIsCamClippingGround = IsCamClippingGround(DesiredCamHit, CamLoc);
+		// // if (bIsCamClippingGround)
+		// // {
+		// 	HeightFromCamToNoClip = DesiredCamHit.Location.Z - CamLoc.Z;
+		//
+		// 	if (GetLocalRole() == ROLE_Authority)
+		// 	{
+		// 		GEngine->AddOnScreenDebugMessage(5, 1, FColor::Emerald, FString::Printf(TEXT("ActorLoc=%s \nCamLoc=%s \nHit.Loc.Z=%.2f \nHeightDiff=%.2f"),
+		// 			*GetActorLocation().ToCompactString(), *CamLoc.ToCompactString(), DesiredCamHit.Location.Z, HeightFromCamToNoClip
+		// 		));
+		// 	}
+		// // }
+
+
 		//~ Movement ~
 		{
 			const FVector InputVector = ConsumeMovementInputVector();
 			const FVector Velocity = InputVector * MoveSpeedCalculated * DeltaTime;
-			SimpleRepMovement.Location += Velocity;
+			TargetLoc += Velocity;
+			if (MapBounds.bIsValid && !MapBounds.IsInside(FVector2D(TargetLoc.X, TargetLoc.Y)))
+			{
+				TargetLoc.X = FMath::Clamp(TargetLoc.X, MapBounds.Min.X, MapBounds.Max.X);
+				TargetLoc.Y = FMath::Clamp(TargetLoc.Y, MapBounds.Min.Y, MapBounds.Max.Y);
+			}
 		}
 
 		//~ Zoom ~
@@ -219,47 +246,78 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 			const FRotator ActorRot = GetActorRotation();
 			const FRotator CurrentRot(SpringArmRot.Pitch, ActorRot.Yaw, 0.f);
 			const FRotator ControlRot = Controller->GetControlRotation().GetNormalized();
-			const FRotator TargetRot(FMath::QInterpTo(FQuat(CurrentRot), FQuat(ControlRot), DeltaTime, CameraRotationLagSpeed));
 
+			const FRotator TargetRot(FMath::QInterpTo(FQuat(CurrentRot), FQuat(ControlRot), DeltaTime, CameraRotationLagSpeed));
 			SetActorRotation(FRotator(0.f, TargetRot.Yaw, 0.f));
 			SpringArmComp->SetRelativeRotation(FRotator(TargetRot.Pitch, 0.f, 0.f));
 			SimpleRepMovement.Yaw = ControlRot.Yaw;
 		}
 
-		float GroundClippingHeight{0.f};
-		FHitResult DesiredCamHit;
-		if (IsCamClippingGround(DesiredCamHit))
-		{
-			const FVector CurrLoc = GetActorLocation();
-			const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
-			// const float NewHeight = DesiredCamHit.Location.Z - (CamLoc.Z - CurrLoc.Z);
-			// SetActorLocation(FVector(CurrLoc.X, CurrLoc.Y, NewHeight));
-			GroundClippingHeight = DesiredCamHit.Location.Z - CamLoc.Z;
-		}
-
 		//~ Apply Movement ~
-		FVector ActorLoc = GetActorLocation();
-		ActorLoc.Z += GroundClippingHeight;
-		FVector TargetLoc = SimpleRepMovement.Location;
-		FVector NewLoc = FMath::VInterpTo(ActorLoc, TargetLoc, DeltaTime, CameraLagSpeed);
-		SetActorLocation(NewLoc);
+		{
+			FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
+			FVector UnFixedCameraLoc = PawnGroundHit.Location + -SpringArmComp->GetForwardVector() * ZoomArmLength;
+			FHitResult DesiredCamHit;
+			bool bIsCamClippingGround = IsCamClippingGround(DesiredCamHit, UnFixedCameraLoc);
+			FVector PawnLoc = GetActorLocation();
+			GroundHeightAtPawnLoc;
+			float GroundHeightAtCamLoc = DesiredCamHit.ImpactPoint.Z;
+			float CamHeightNoClip = DesiredCamHit.Location.Z;
+			TargetLoc;
+			float OffsetForCamClipping = CamHeightNoClip - CamLoc.Z; 
+			OffsetForCamClipping = CamHeightNoClip - UnFixedCameraLoc.Z;
+
+			//////// code here ////////
+			TargetLoc.Z = GroundHeightAtPawnLoc;
+
+			if (bIsCamClippingGround)
+			{
+				TargetLoc.Z += OffsetForCamClipping;
+			}
+			//////// stop ////////
+			TargetLoc.Z += DebugTargetZOffset;
+			if (!FMath::IsNearlyZero(DebugTargetZ))
+			{
+				TargetLoc.Z = DebugTargetZ;
+			}
+			FVector NewLoc = FMath::VInterpTo(PawnLoc, TargetLoc, DeltaTime, CameraLagSpeed);
+
+			//////// code here ////////
+			if (bIsCamClippingGround)
+			{
+				NewLoc.Z = TargetLoc.Z;
+			}
+			//////// stop ////////
+			NewLoc.Z += DebugNewLocZOffset;
+			if (!FMath::IsNearlyZero(DebugNewLocZ))
+			{
+				NewLoc.Z = DebugNewLocZ;
+			}
+			SetActorLocation(NewLoc);
+			SimpleRepMovement.Location = FVector(TargetLoc.X, TargetLoc.Y, GroundHeightAtPawnLoc);
+			
+			if (GetLocalRole() == ROLE_Authority)
+			{
+				GEngine->AddOnScreenDebugMessage(6, 1.f, FColor::Green, FString::Printf(TEXT("bCamTraceHit=%s bIsCamClippingGround=%s \nOffsetForCamClipping=%.2f \nCamHeightNoClip=%.2f \nGroundHeightAtPawnLoc=%.2f \nGroundHeightAtCamLoc=%.2f \nPawnGroundHit.Loc=%s \nNewLoc=%s \nActorLoc=%s \nTargetLoc=%s \nCamLoc=%s \nUnFixedCameraLoc.Z=%s "),
+					*LexToString(DesiredCamHit.bBlockingHit), *LexToString(bIsCamClippingGround), OffsetForCamClipping, CamHeightNoClip, GroundHeightAtPawnLoc, GroundHeightAtCamLoc, *PawnGroundHit.Location.ToCompactString(), *NewLoc.ToCompactString(), *PawnLoc.ToCompactString(), *TargetLoc.ToCompactString(), *CamLoc.ToCompactString(), *UnFixedCameraLoc.ToCompactString() 
+				));
+			}
+		}
 
 		if (GetLocalRole() == ROLE_Authority)
 		{
-
 		}
 		else if (GetLocalRole() == ROLE_AutonomousProxy)
 		{
-			
 		}
 	}
 	else
 	{
 		//~ Apply Movement ~
-		const FVector ActorLocation = GetActorLocation();
-		const FVector NewLocation = FMath::VInterpTo(ActorLocation, SimpleRepMovement.Location, DeltaTime, CameraLagSpeed);
-		SetActorLocation(NewLocation);
-		
+		const FVector ActorLoc = GetActorLocation();
+		const FVector NewLoc = FMath::VInterpTo(ActorLoc, SimpleRepMovement.Location, DeltaTime, CameraLagSpeed);
+		SetActorLocation(NewLoc);
+
 		const FRotator ProxyRot(0.f, SimpleRepMovement.Yaw, 0.f);
 		SetActorRotation(ProxyRot);
 	}
@@ -271,10 +329,10 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 	{
 		if (const UWorld* World = GetWorld())
 		{
-			FVector ActorLocation = GetActorLocation();
+			FVector ActorLoc = GetActorLocation();
 			DrawDebugSphere(World, SimpleRepMovement.Location, 5.f, 8, FColor::Green);
-			DrawDebugDirectionalArrow(World, ActorLocation, SimpleRepMovement.Location, 7.5f, FColor::Green);
-			DrawDebugCone(World, ActorLocation, GetActorForwardVector(), 175.f, 0.7f, 0.f, 8, FColor::Yellow);
+			DrawDebugDirectionalArrow(World, ActorLoc, SimpleRepMovement.Location, 7.5f, FColor::Green);
+			DrawDebugCone(World, ActorLoc, GetActorForwardVector(), 175.f, 0.7f, 0.f, 8, FColor::Yellow);
 		}
 	}
 #endif
@@ -282,7 +340,7 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 
 UE_ENABLE_OPTIMIZATION
 
-void AStratPlayerCameraPawn::TimerLoop_TraceForCameraHeight()
+void AStratPlayerCameraPawn::TimerLoop_TraceForPawnHeight()
 {
 	const UWorld* World = GetWorld();
 	if (!World) { return; }
@@ -316,8 +374,8 @@ void AStratPlayerCameraPawn::TimerLoop_TraceForCameraHeight()
 	//~ todo: have floor system with terrain block, and floors overlap.
 	if (!HitResults.IsEmpty())
 	{
-		const float GroundZ = HitResults[0].Location.Z;
-		SimpleRepMovement.Location.Z = GroundZ;
+		GroundHeightAtPawnLoc = HitResults[0].Location.Z;
+		PawnGroundHit = HitResults[0];
 	}
 }
 

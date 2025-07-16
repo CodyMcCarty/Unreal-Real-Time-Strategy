@@ -85,7 +85,7 @@ public:
 #pragma endregion
 
 protected:
-	void TimerLoop_TraceForCameraHeight();
+	void TimerLoop_TraceForPawnHeight();
 	void TimerLoop_SendSimpleRepMovement();
 	void Move(const FInputActionInstance& InputActionInstance);
 	void Zoom(const FInputActionInstance& InputActionInstance);
@@ -106,7 +106,8 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite) // todo: does this a uprop()?
 	TObjectPtr<USpringArmComponent> SpringArmComp;
-	
+
+	FHitResult PawnGroundHit;
 	FTimerHandle SendSimpleRepMovement_TimerHandle;
 	FTimerHandle TraceForCameraHeight_TimerHandle;
 	FIntPoint MousePosSnapshot;
@@ -114,6 +115,20 @@ protected:
 	/** Draws a number of debug visualizations for testing during PIE. Draws a trace for the ground. Draws Rotations (Control=Yellow, Actor=Orange, SpringArm=Red). Draws markers at the camera target (in green) and the lagged position (in yellow). A line is drawn between the two locations, in green. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="User|Info")
 	bool bDrawDebugMarkers{false};
+
+	float GroundHeightAtPawnLoc{0};
+	FVector TargetLoc;
+
+	// debugs
+	UPROPERTY(EditAnywhere, Category="User|Debug")
+	float DebugTargetZOffset;
+	UPROPERTY(EditAnywhere, Category="User|Debug")
+	float DebugTargetZ;
+	UPROPERTY(EditAnywhere, Category="User|Debug")
+	float DebugNewLocZOffset;
+	UPROPERTY(EditAnywhere, Category="User|Debug")
+	float DebugNewLocZ;
+	// end debugs
 
 	/** This value is calculated. Based on Zoom, Min&MaxZoom, and Min&MaxMoveSpeed. Zoomed out goes faster. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="User|Info", meta=(Units="cm/s"))
@@ -146,6 +161,10 @@ protected:
 	/** Expects a bool. Normally mmb and/or ctrl, alt */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="User|Options")
 	TObjectPtr<UInputAction> Input_EnableRotate;
+
+	/** Limits camera movement bounds so the player doesn't leave the play space if valid. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="User|Options")
+	FBox2D MapBounds{FVector2D(-80000.f, -80000.f), FVector2D(80000.f, 80000.f)};
 
 	/** Controls how quickly the camera reaches target position. Low values are slower (more lag), high values are faster (less lag), while zero is instant (no lag). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="User|Options", meta=(ClampMin="0.0", ClampMax="1000.0", UIMin = "0.0", UIMax = "50.0"))
@@ -189,6 +208,6 @@ protected:
 #pragma endregion
 
 protected:
-	bool IsCamClippingGround(FHitResult& OutHit) const;
+	bool IsCamClippingGround(FHitResult& OutHit, FVector CamLoc) const;
 	FRotator FindCamLookAtRot(const FHitResult& InDesiredCamHit) const;
 };
