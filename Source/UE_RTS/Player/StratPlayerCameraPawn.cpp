@@ -6,9 +6,7 @@
 #include "EnhancedInputSubsystems.h"
 #include "KismetTraceUtils.h"
 #include "SandCoreLogToolsBPLibrary.h"
-#include "Camera/CameraComponent.h"
 #include "GameFramework/SpringArmComponent.h"
-#include "Kismet/KismetMathLibrary.h"
 #include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY(LogGame);
@@ -33,7 +31,7 @@ namespace
 	FRotator ClampPitch(const FRotator& Rot)
 	{
 		FRotator Result = Rot;
-		Result.Pitch = FMath::Clamp(Result.Pitch, -85.f, 20.f); // <- normalized. UnNormal Rot would be 
+		Result.Pitch = FMath::Clamp(Result.Pitch, -85.f, 20.f); // <- normalized. UnNormal Rot would be
 		return Result;
 	}
 
@@ -138,7 +136,7 @@ void AStratPlayerCameraPawn::BeginPlay()
 
 	{
 		const FVector ActorLocation = GetActorLocation();
-		TargetLoc = ActorLocation;
+		TargetMoveLoc = ActorLocation;
 		SimpleRepMovement.Location = ActorLocation;
 		SimpleRepMovement.Yaw = GetActorRotation().Yaw;
 	}
@@ -156,7 +154,7 @@ void AStratPlayerCameraPawn::NotifyControllerChanged()
 {
 	if (IsLocallyControlled())
 	{
-		GetWorldTimerManager().SetTimer(TraceForCameraHeight_TimerHandle, this, &ThisClass::TimerLoop_TraceForPawnHeight, 1 / TraceForCameraHeight_TimerFreq, true);
+		GetWorldTimerManager().SetTimer(TraceForHeight_TimerHandle, this, &ThisClass::TimerLoop_TraceForHeight, 1 / TraceForHeight_TimerFreq, true);
 
 		SetInputMode_RTSStyle(Cast<APlayerController>(Controller));
 	}
@@ -168,36 +166,7 @@ void AStratPlayerCameraPawn::OnRep_Controller()
 {
 	Super::OnRep_Controller();
 
-	GetWorldTimerManager().SetTimer(SendSimpleRepMovement_TimerHandle, this, &ThisClass::TimerLoop_SendSimpleRepMovement, 1 / SendTransform_TimerFreq, true);
-}
-
-UE_DISABLE_OPTIMIZATION
-
-bool AStratPlayerCameraPawn::IsCamClippingGround(FHitResult& OutHit, FVector CamLoc) const
-{
-	// const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
-	const bool bHit = GetWorld()->SweepSingleByChannel
-	(
-		OutHit,
-		CamLoc + FVector(0.f, 0.f, 10000.f),
-		CamLoc - FVector(0.f, 0.f, 500.f),
-		FQuat::Identity, TerrainHeightTraceChannel,
-		FCollisionShape::MakeSphere(100.f),
-		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn), false, this)
-	);
-
-	return bHit && OutHit.Location.Z > CamLoc.Z;
-}
-
-FRotator AStratPlayerCameraPawn::FindCamLookAtRot(const FHitResult& InDesiredCamHit) const
-{
-	FRotator ResultRot = Controller->GetControlRotation().GetNormalized();
-	const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
-	const FVector SafeCamLoc(CamLoc.X, CamLoc.Y, InDesiredCamHit.Location.Z);
-	const FRotator LookAtRot = FRotationMatrix::MakeFromX(GetActorLocation() - SafeCamLoc).Rotator();
-	ResultRot.Pitch = LookAtRot.Pitch;
-
-	return ResultRot;
+	GetWorldTimerManager().SetTimer(SendSimpleRepMovement_TimerHandle, this, &ThisClass::TimerLoop_ServerSetSimpleRepMovement, 1 / SendTransform_TimerFreq, true);
 }
 
 void AStratPlayerCameraPawn::Tick(float DeltaTime)
@@ -206,33 +175,12 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 
 	if (IsLocallyControlled())
 	{
-		// float HeightFromCamToNoClip{0.f};
-		// const FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
-		// FHitResult DesiredCamHit;
-		// bool bIsCamClippingGround = IsCamClippingGround(DesiredCamHit, CamLoc);
-		// // if (bIsCamClippingGround)
-		// // {
-		// 	HeightFromCamToNoClip = DesiredCamHit.Location.Z - CamLoc.Z;
-		//
-		// 	if (GetLocalRole() == ROLE_Authority)
-		// 	{
-		// 		GEngine->AddOnScreenDebugMessage(5, 1, FColor::Emerald, FString::Printf(TEXT("ActorLoc=%s \nCamLoc=%s \nHit.Loc.Z=%.2f \nHeightDiff=%.2f"),
-		// 			*GetActorLocation().ToCompactString(), *CamLoc.ToCompactString(), DesiredCamHit.Location.Z, HeightFromCamToNoClip
-		// 		));
-		// 	}
-		// // }
-
-
 		//~ Movement ~
 		{
 			const FVector InputVector = ConsumeMovementInputVector();
 			const FVector Velocity = InputVector * MoveSpeedCalculated * DeltaTime;
-			TargetLoc += Velocity;
-			if (MapBounds.bIsValid && !MapBounds.IsInside(FVector2D(TargetLoc.X, TargetLoc.Y)))
-			{
-				TargetLoc.X = FMath::Clamp(TargetLoc.X, MapBounds.Min.X, MapBounds.Max.X);
-				TargetLoc.Y = FMath::Clamp(TargetLoc.Y, MapBounds.Min.Y, MapBounds.Max.Y);
-			}
+			TargetMoveLoc += Velocity;
+			TargetMoveLoc.Z = GroundHit.Location.Z;
 		}
 
 		//~ Zoom ~
@@ -242,12 +190,11 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 
 		//~ Rotation ~ (Pitch controls the SpringArmComp. Yaw controls the Actor.)
 		{
-			const FRotator SpringArmRot = SpringArmComp->GetRelativeRotation();
-			const FRotator ActorRot = GetActorRotation();
-			const FRotator CurrentRot(SpringArmRot.Pitch, ActorRot.Yaw, 0.f);
+			const FRotator CurrentRot(SpringArmComp->GetRelativeRotation().Pitch, GetActorRotation().Yaw, 0.f);
 			const FRotator ControlRot = Controller->GetControlRotation().GetNormalized();
 
 			const FRotator TargetRot(FMath::QInterpTo(FQuat(CurrentRot), FQuat(ControlRot), DeltaTime, CameraRotationLagSpeed));
+			
 			SetActorRotation(FRotator(0.f, TargetRot.Yaw, 0.f));
 			SpringArmComp->SetRelativeRotation(FRotator(TargetRot.Pitch, 0.f, 0.f));
 			SimpleRepMovement.Yaw = ControlRot.Yaw;
@@ -255,92 +202,55 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 
 		//~ Apply Movement ~
 		{
-			FVector CamLoc = SpringArmComp->UnfixedCameraPosition;
-			FVector UnFixedCameraLoc = PawnGroundHit.Location + -SpringArmComp->GetForwardVector() * ZoomArmLength;
-			FHitResult DesiredCamHit;
-			bool bIsCamClippingGround = IsCamClippingGround(DesiredCamHit, UnFixedCameraLoc);
-			FVector PawnLoc = GetActorLocation();
-			GroundHeightAtPawnLoc;
-			float GroundHeightAtCamLoc = DesiredCamHit.ImpactPoint.Z;
-			float CamHeightNoClip = DesiredCamHit.Location.Z;
-			TargetLoc;
-			float OffsetForCamClipping = CamHeightNoClip - CamLoc.Z; 
-			OffsetForCamClipping = CamHeightNoClip - UnFixedCameraLoc.Z;
+			const FVector UnfixedCamLoc = GroundHit.Location + (-SpringArmComp->GetForwardVector() * ZoomArmLength);
+			FHitResult CamHit;
+			const bool bCamHit = TraceForCamHeight(CamHit, UnfixedCamLoc);
+			const bool bIsCamClippingGround = bCamHit && CamHit.Location.Z > UnfixedCamLoc.Z; 
+			if (bIsCamClippingGround)
+			{
+				const float OffsetForCamClipping = CamHit.Location.Z - UnfixedCamLoc.Z;
+				TargetMoveLoc.Z += OffsetForCamClipping;
+			}
 
-			//////// code here ////////
-			TargetLoc.Z = GroundHeightAtPawnLoc;
+			const FVector ActorLoc = GetActorLocation();
+			FVector NewLoc = FMath::VInterpTo(ActorLoc, TargetMoveLoc, DeltaTime, CameraLagSpeed);
 
 			if (bIsCamClippingGround)
 			{
-				TargetLoc.Z += OffsetForCamClipping;
+				NewLoc.Z = TargetMoveLoc.Z;
 			}
-			//////// stop ////////
-			TargetLoc.Z += DebugTargetZOffset;
-			if (!FMath::IsNearlyZero(DebugTargetZ))
-			{
-				TargetLoc.Z = DebugTargetZ;
-			}
-			FVector NewLoc = FMath::VInterpTo(PawnLoc, TargetLoc, DeltaTime, CameraLagSpeed);
-
-			//////// code here ////////
-			if (bIsCamClippingGround)
-			{
-				NewLoc.Z = TargetLoc.Z;
-			}
-			//////// stop ////////
-			NewLoc.Z += DebugNewLocZOffset;
-			if (!FMath::IsNearlyZero(DebugNewLocZ))
-			{
-				NewLoc.Z = DebugNewLocZ;
-			}
-			SetActorLocation(NewLoc);
-			SimpleRepMovement.Location = FVector(TargetLoc.X, TargetLoc.Y, GroundHeightAtPawnLoc);
 			
-			if (GetLocalRole() == ROLE_Authority)
-			{
-				GEngine->AddOnScreenDebugMessage(6, 1.f, FColor::Green, FString::Printf(TEXT("bCamTraceHit=%s bIsCamClippingGround=%s \nOffsetForCamClipping=%.2f \nCamHeightNoClip=%.2f \nGroundHeightAtPawnLoc=%.2f \nGroundHeightAtCamLoc=%.2f \nPawnGroundHit.Loc=%s \nNewLoc=%s \nActorLoc=%s \nTargetLoc=%s \nCamLoc=%s \nUnFixedCameraLoc.Z=%s "),
-					*LexToString(DesiredCamHit.bBlockingHit), *LexToString(bIsCamClippingGround), OffsetForCamClipping, CamHeightNoClip, GroundHeightAtPawnLoc, GroundHeightAtCamLoc, *PawnGroundHit.Location.ToCompactString(), *NewLoc.ToCompactString(), *PawnLoc.ToCompactString(), *TargetLoc.ToCompactString(), *CamLoc.ToCompactString(), *UnFixedCameraLoc.ToCompactString() 
-				));
-			}
-		}
-
-		if (GetLocalRole() == ROLE_Authority)
-		{
-		}
-		else if (GetLocalRole() == ROLE_AutonomousProxy)
-		{
+			SetActorLocation(NewLoc);
+			SimpleRepMovement.Location = FVector(TargetMoveLoc.X, TargetMoveLoc.Y, GroundHit.Location.Z);
 		}
 	}
 	else
 	{
-		//~ Apply Movement ~
+		//~ Apply network Proxy Movement ~
+		TargetMoveLoc = SimpleRepMovement.Location;
 		const FVector ActorLoc = GetActorLocation();
-		const FVector NewLoc = FMath::VInterpTo(ActorLoc, SimpleRepMovement.Location, DeltaTime, CameraLagSpeed);
+		const FVector NewLoc = FMath::VInterpTo(ActorLoc, TargetMoveLoc, DeltaTime, CameraLagSpeed);
 		SetActorLocation(NewLoc);
 
 		const FRotator ProxyRot(0.f, SimpleRepMovement.Yaw, 0.f);
 		SetActorRotation(ProxyRot);
 	}
 
-	// todo: FMath::ComputeSlideVector
-
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	if (bDrawDebugMarkers)
 	{
 		if (const UWorld* World = GetWorld())
 		{
-			FVector ActorLoc = GetActorLocation();
-			DrawDebugSphere(World, SimpleRepMovement.Location, 5.f, 8, FColor::Green);
-			DrawDebugDirectionalArrow(World, ActorLoc, SimpleRepMovement.Location, 7.5f, FColor::Green);
+			const FVector ActorLoc = GetActorLocation();
+			DrawDebugSphere(World, TargetMoveLoc, 5.f, 8, FColor::Green);
+			DrawDebugDirectionalArrow(World, ActorLoc, TargetMoveLoc, 7.5f, FColor::Green);
 			DrawDebugCone(World, ActorLoc, GetActorForwardVector(), 175.f, 0.7f, 0.f, 8, FColor::Yellow);
 		}
 	}
 #endif
 }
 
-UE_ENABLE_OPTIMIZATION
-
-void AStratPlayerCameraPawn::TimerLoop_TraceForPawnHeight()
+void AStratPlayerCameraPawn::TimerLoop_TraceForHeight()
 {
 	const UWorld* World = GetWorld();
 	if (!World) { return; }
@@ -350,9 +260,6 @@ void AStratPlayerCameraPawn::TimerLoop_TraceForPawnHeight()
 	const FVector Start = SimpleRepMovement.Location + Dist;
 	const FVector End = SimpleRepMovement.Location - Dist;
 	constexpr float Radius = 75.f;
-	FCollisionQueryParams QueryParams = FCollisionQueryParams::DefaultQueryParam; // 
-	QueryParams.AddIgnoredActor(this);
-	QueryParams.bTraceComplex = false;
 	const bool bHit = World->SweepMultiByChannel
 	(HitResults,
 		Start,
@@ -360,29 +267,56 @@ void AStratPlayerCameraPawn::TimerLoop_TraceForPawnHeight()
 		FQuat::Identity,
 		TerrainHeightTraceChannel,
 		FCollisionShape::MakeSphere(Radius),
-		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn), false, this)
+		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn_TraceForHeight), false, this)
 	);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	if (bDrawDebugMarkers)
 	{
-		DrawDebugSphereTraceMulti(World, Start, End, Radius, EDrawDebugTrace::ForDuration, bHit, HitResults, FLinearColor::Red, FLinearColor::Green, 1 / TraceForCameraHeight_TimerFreq);
+		DrawDebugSphereTraceMulti(World, Start, End, Radius, EDrawDebugTrace::ForDuration, bHit, HitResults, FLinearColor::Red, FLinearColor::Green, 1 / TraceForHeight_TimerFreq);
 	}
 #endif
 
 	//~ a blocking hit (if found) will be the last element of the array. the results are [0] is top floor [last] is terrain.
-	//~ todo: have floor system with terrain block, and floors overlap.
+	// todo: have floor system with terrain block, and floors overlap.
 	if (!HitResults.IsEmpty())
 	{
-		GroundHeightAtPawnLoc = HitResults[0].Location.Z;
-		PawnGroundHit = HitResults[0];
+		GroundHit = HitResults[0];
 	}
 }
 
-void AStratPlayerCameraPawn::TimerLoop_SendSimpleRepMovement()
+void AStratPlayerCameraPawn::TimerLoop_ServerSetSimpleRepMovement()
 {
 	SimpleRepMovement.ServerFrame++;
 	Server_SetSimpleRepMovementState(SimpleRepMovement);
+}
+
+bool AStratPlayerCameraPawn::TraceForCamHeight(FHitResult& OutHit, const FVector& CamLoc) const // to make static: const AActor* WorldContextObj, ECollisionChannel TerrainHeightTraceChannel, const bool DrawDebug
+{
+	const UWorld* World = GetWorld();
+	if (!World) { return false; }
+
+	const FVector Start = CamLoc + FVector(0.f, 0.f, 10000.f);
+	const FVector End = CamLoc - FVector(0.f, 0.f, 500.f);
+	constexpr float CamCollisionRadius = 100.f;
+	const bool bHit = World->SweepSingleByChannel
+	(
+		OutHit,
+		Start,
+		End,
+		FQuat::Identity, TerrainHeightTraceChannel,
+		FCollisionShape::MakeSphere(CamCollisionRadius),
+		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn_TraceForCamHeight), false, this)
+	);
+
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	if (bDrawDebugMarkers)
+	{
+		DrawDebugSphereTraceSingle(World, Start, End, CamCollisionRadius, EDrawDebugTrace::ForOneFrame, bHit, OutHit, FLinearColor::Red, FLinearColor::Green, 1.f);
+	}
+#endif
+
+	return bHit; 
 }
 
 void AStratPlayerCameraPawn::Move(const FInputActionInstance& InputActionInstance)
@@ -390,6 +324,12 @@ void AStratPlayerCameraPawn::Move(const FInputActionInstance& InputActionInstanc
 	const FVector2D Direction = InputActionInstance.GetValue().Get<FVector2D>().GetSafeNormal();
 	AddMovementInput(GetActorForwardVector(), Direction.Y);
 	AddMovementInput(GetActorRightVector(), Direction.X);
+
+	if (MapBounds.bIsValid && !MapBounds.IsInside(FVector2D(TargetMoveLoc.X, TargetMoveLoc.Y)))
+	{
+		TargetMoveLoc.X = FMath::Clamp(TargetMoveLoc.X, MapBounds.Min.X, MapBounds.Max.X);
+		TargetMoveLoc.Y = FMath::Clamp(TargetMoveLoc.Y, MapBounds.Min.Y, MapBounds.Max.Y);
+	}
 }
 
 void AStratPlayerCameraPawn::Zoom(const FInputActionInstance& InputActionInstance)
@@ -417,7 +357,8 @@ void AStratPlayerCameraPawn::RotateStarted(const FInputActionInstance& InputActi
 
 void AStratPlayerCameraPawn::Rotate(const FInputActionInstance& InputActionInstance)
 {
-	const FVector2D RotateValue = InputActionInstance.GetValue().Get<FVector2D>();
+	FVector2D RotateValue = InputActionInstance.GetValue().Get<FVector2D>();
+	RotateValue *= RotateSpeed;
 	AddControllerYawInput(RotateValue.X);
 	AddControllerPitchInput(RotateValue.Y);
 
