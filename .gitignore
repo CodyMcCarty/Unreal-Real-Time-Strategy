@@ -67,6 +67,7 @@ Plugins/*/Binaries/*
 
 # Builds
 Build/*
+PackagedProject/*
 
 # File Open Order
 Build/Windows/FileOpenOrder/*
