@@ -13,6 +13,9 @@ DEFINE_LOG_CATEGORY(LogGame);
 
 namespace
 {
+	/** Just basing this on 16bit height maps. Consider moving this to a GameConstants.h/namespace GameConstants{} or UDeveloperSettings or find this num in UE. */
+	inline constexpr float MapHalfHeight = 32'500.f;
+
 	float GetZoomAlpha(const float TargetArmLength, const float MinZoom, const float MaxZoom)
 	{
 		return (TargetArmLength - MinZoom) / (MaxZoom - MinZoom);
@@ -97,6 +100,10 @@ AStratPlayerCameraPawn::AStratPlayerCameraPawn()
 	const float ArmLengthNormal = GetZoomAlpha(ZoomArmLength, MinZoom, MaxZoom);
 	MoveSpeedCalculated = FMath::Lerp(MinMoveSpeed, MaxMoveSpeed, ArmLengthNormal);
 	MapBounds.bIsValid = true;
+
+#if (UE_BUILD_SHIPPING)
+	bDrawDebugMarkers = false;
+#endif
 }
 
 void AStratPlayerCameraPawn::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const
@@ -194,7 +201,7 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 			const FRotator ControlRot = Controller->GetControlRotation().GetNormalized();
 
 			const FRotator TargetRot(FMath::QInterpTo(FQuat(CurrentRot), FQuat(ControlRot), DeltaTime, CameraRotationLagSpeed));
-			
+
 			SetActorRotation(FRotator(0.f, TargetRot.Yaw, 0.f));
 			SpringArmComp->SetRelativeRotation(FRotator(TargetRot.Pitch, 0.f, 0.f));
 			SimpleRepMovement.Yaw = ControlRot.Yaw;
@@ -204,8 +211,8 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 		{
 			const FVector UnfixedCamLoc = GroundHit.Location + (-SpringArmComp->GetForwardVector() * ZoomArmLength);
 			FHitResult CamHit;
-			const bool bCamHit = TraceForCamHeight(CamHit, UnfixedCamLoc);
-			const bool bIsCamClippingGround = bCamHit && CamHit.Location.Z > UnfixedCamLoc.Z; 
+			const bool bCamHit = TraceForCamCollision(CamHit, UnfixedCamLoc);
+			const bool bIsCamClippingGround = bCamHit && CamHit.Location.Z > UnfixedCamLoc.Z;
 			if (bIsCamClippingGround)
 			{
 				const float OffsetForCamClipping = CamHit.Location.Z - UnfixedCamLoc.Z;
@@ -219,7 +226,7 @@ void AStratPlayerCameraPawn::Tick(float DeltaTime)
 			{
 				NewLoc.Z = TargetMoveLoc.Z;
 			}
-			
+
 			SetActorLocation(NewLoc);
 			SimpleRepMovement.Location = FVector(TargetMoveLoc.X, TargetMoveLoc.Y, GroundHit.Location.Z);
 		}
@@ -256,9 +263,8 @@ void AStratPlayerCameraPawn::TimerLoop_TraceForHeight()
 	if (!World) { return; }
 
 	TArray<FHitResult> HitResults;
-	const FVector Dist(0.f, 0.f, 10'000.f);
-	const FVector Start = SimpleRepMovement.Location + Dist;
-	const FVector End = SimpleRepMovement.Location - Dist;
+	const FVector Start = GetActorLocation() + FVector::UpVector * MapHalfHeight;
+	const FVector End = GetActorLocation() - FVector::UpVector * MapHalfHeight;
 	constexpr float Radius = 75.f;
 	const bool bHit = World->SweepMultiByChannel
 	(HitResults,
@@ -291,20 +297,22 @@ void AStratPlayerCameraPawn::TimerLoop_ServerSetSimpleRepMovement()
 	Server_SetSimpleRepMovementState(SimpleRepMovement);
 }
 
-bool AStratPlayerCameraPawn::TraceForCamHeight(FHitResult& OutHit, const FVector& CamLoc) const // to make static: const AActor* WorldContextObj, ECollisionChannel TerrainHeightTraceChannel, const bool DrawDebug
+// todo: consider using a sphere collision component. Could I remove the FloorTraceChannel var?
+bool AStratPlayerCameraPawn::TraceForCamCollision(FHitResult& OutHit, const FVector& CamLoc) const // to make static: const AActor* WorldContextObj, ECollisionChannel TerrainHeightTraceChannel, const bool DrawDebug
 {
 	const UWorld* World = GetWorld();
 	if (!World) { return false; }
 
-	const FVector Start = CamLoc + FVector(0.f, 0.f, 10000.f);
-	const FVector End = CamLoc - FVector(0.f, 0.f, 500.f);
+	const FVector Start = CamLoc + FVector::UpVector * MapHalfHeight;
 	constexpr float CamCollisionRadius = 100.f;
+	const FVector End = CamLoc - FVector::UpVector * CamCollisionRadius * 3;
 	const bool bHit = World->SweepSingleByChannel
 	(
 		OutHit,
 		Start,
 		End,
-		FQuat::Identity, TerrainHeightTraceChannel,
+		FQuat::Identity,
+		TerrainHeightTraceChannel,
 		FCollisionShape::MakeSphere(CamCollisionRadius),
 		FCollisionQueryParams(SCENE_QUERY_STAT(CameraPawn_TraceForCamHeight), false, this)
 	);
@@ -316,7 +324,7 @@ bool AStratPlayerCameraPawn::TraceForCamHeight(FHitResult& OutHit, const FVector
 	}
 #endif
 
-	return bHit; 
+	return bHit;
 }
 
 void AStratPlayerCameraPawn::Move(const FInputActionInstance& InputActionInstance)

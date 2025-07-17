@@ -59,7 +59,7 @@ public:
 protected:
 	void TimerLoop_TraceForHeight();
 	void TimerLoop_ServerSetSimpleRepMovement();
-	bool TraceForCamHeight(FHitResult& OutHit, const FVector& CamLoc) const; 
+	bool TraceForCamCollision(FHitResult& OutHit, const FVector& CamLoc) const; 
 	void Move(const FInputActionInstance& InputActionInstance);
 	void Zoom(const FInputActionInstance& InputActionInstance);
 	void RotateStarted(const FInputActionInstance& InputActionInstance);
